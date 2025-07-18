@@ -16,19 +16,26 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:5173'];
+
 const corsOptions = {
     origin: (origin, callback) => {
-        // Allow requests with no origin (like mobile apps or curl requests)
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) === -1) {
-            const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
-            return callback(new Error(msg), false);
+        if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            callback(new Error('Not allowed by CORS'));
         }
-        return callback(null, true);
-    }
+    },
+    credentials: true,
 };
 
+// --- FIX: Apply CORS middleware globally ---
 app.use(cors(corsOptions));
+
+// --- FIX: Handle CORS preflight requests for all routes ---
+// This must come BEFORE your other routes and auth middleware.
+app.options('*', cors(corsOptions));
+
+
 app.use(express.json());
 
 mongoose.connect(process.env.MONGO_URI)
