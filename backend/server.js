@@ -15,8 +15,8 @@ const authMiddleware = require('./authMiddleware');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// --- 1. Setup Top-Level Middleware (Run ONCE at the top) ---
 const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:5173'];
-
 const corsOptions = {
     origin: (origin, callback) => {
         if (!origin || allowedOrigins.indexOf(origin) !== -1) {
@@ -27,22 +27,16 @@ const corsOptions = {
     },
     credentials: true,
 };
-
-// --- FIX: Apply CORS middleware globally ---
 app.use(cors(corsOptions));
-
-// --- FIX: Handle CORS preflight requests for all routes ---
-// This must come BEFORE your other routes and auth middleware.
-app.options('*', cors(corsOptions));
-
-
+app.options('*', cors(corsOptions)); // Handle preflight requests
 app.use(express.json());
 
+// --- 2. Database Connection (Connect ONCE) ---
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('[Main] ✅ Successfully connected to MongoDB Atlas!'))
     .catch(err => console.error('[Main] ❌ Error connecting to MongoDB:', err));
 
-// --- Public Login Route ---
+// --- 3. Public Login Route (Defined BEFORE authentication) ---
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) { return res.status(400).json({ message: 'Username and password are required.' }); }
@@ -53,10 +47,12 @@ app.post('/api/login', async (req, res) => {
     res.json({ token });
 });
 
-// --- Apply Authentication Middleware ---
+// --- 4. Apply Authentication Middleware (Apply ONCE) ---
+// All routes defined after this point will be protected.
 app.use(authMiddleware);
 
-// --- UPDATED: FOIS Proxy with final, robust parsing for all fields ---
+// --- 5. Protected API Routes ---
+
 app.get('/api/fois/loco/:locoId', async (req, res) => {
     try {
         const { locoId } = req.params;
@@ -65,17 +61,15 @@ app.get('/api/fois/loco/:locoId', async (req, res) => {
 
         const data = response.data;
         if (!data.LocoDtls || data.LocoDtls.length === 0 || !data.LocoDtls[0].PopUpMsg) {
-            return res.status(404).json({ message: 'Loco not found or has no position data on the FOIS/RTIS server.' });
+            return res.status(404).json({ message: 'Loco not found on FOIS server.' });
         }
 
         const details = data.LocoDtls[0];
         const popupMsg = details.PopUpMsg;
         
         const stripHtml = (html) => html ? html.replace(/<[^>]*>/g, '').trim() : '';
-
         const stationMatch = popupMsg.match(/Station:\s*(.*?)(?=<br|<div|$)/s);
         const eventMatch = popupMsg.match(/Event:\s*(.*?)(?=<br|<div|$)/s);
-        // --- FIX: Use the same robust line-capturing logic for speed ---
         const speedMatch = popupMsg.match(/Speed:\s*(.*?)(?=<br|<div|$)/s);
         const timestampMatch = popupMsg.match(/\((\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})\)/);
 
@@ -93,7 +87,6 @@ app.get('/api/fois/loco/:locoId', async (req, res) => {
             longitude: parseFloat(details.Lgtd),
             station: stationMatch ? stripHtml(stationMatch[1]) : 'N/A',
             event: eventMatch ? stripHtml(eventMatch[1]) : 'N/A',
-            // --- FIX: Clean the speed string and then parse the integer ---
             speed: speedMatch ? (parseInt(stripHtml(speedMatch[1]), 10) || 0) : 0,
             timestamp: timestamp.toISOString(),
             train_no: null 
@@ -105,7 +98,6 @@ app.get('/api/fois/loco/:locoId', async (req, res) => {
         }
         
         res.json(structuredResponse);
-
     } catch (error) {
         if (error.response && typeof error.response.data === 'string') {
             return res.status(404).json({ message: 'Loco not found or invalid response from FOIS.' });
@@ -113,10 +105,6 @@ app.get('/api/fois/loco/:locoId', async (req, res) => {
         res.status(500).json({ message: 'Server error while fetching data from FOIS.', error: error.message });
     }
 });
-
-
-
-// --- Existing Protected API Routes ---
 
 app.get('/api/train-profile/:trainNo', async (req, res) => {
     try {
@@ -160,11 +148,8 @@ app.get('/api/search/loco/:locoId', async (req, res) => {
     try {
         const { locoId } = req.params;
         const latestPosition = await LocoPosition.findOne({ loco_no: parseInt(locoId) }).sort({ timestamp: -1 });
-        if (latestPosition) {
-            res.json(latestPosition);
-        } else {
-            res.status(404).json({ message: 'Loco not found in database' });
-        }
+        if (latestPosition) { res.json(latestPosition); } 
+        else { res.status(404).json({ message: 'Loco not found in database' }); }
     } catch (error) {
         res.status(500).json({ message: 'Server error', error: error.message });
     }
@@ -174,17 +159,14 @@ app.get('/api/search/train/:trainId', async (req, res) => {
     try {
         const { trainId } = req.params;
         const latestPosition = await LocoPosition.findOne({ train_no: parseInt(trainId) }).sort({ timestamp: -1 });
-        if (latestPosition) {
-            res.json(latestPosition);
-        } else {
-            res.status(404).json({ message: 'Train not found in database' });
-        }
+        if (latestPosition) { res.json(latestPosition); } 
+        else { res.status(404).json({ message: 'Train not found in database' }); }
     } catch (error) {
         res.status(500).json({ message: 'Server error', error: error.message });
     }
 });
 
-// --- Background Worker Logic ---
+// --- 6. Background Worker Logic ---
 function startDataCollectorWorker() {
     console.log('[Main] Starting data collector worker...');
     const worker = new Worker(path.resolve(__dirname, 'data-collector.js'));
@@ -205,7 +187,7 @@ function startDataCollectorWorker() {
     });
 }
 
-// --- Start the server and the worker ---
+// --- 7. Start the server (MUST be the last major step) ---
 app.listen(PORT, () => {
     console.log(`[Main] 🚀 API server is running on http://localhost:${PORT}`);
     startDataCollectorWorker();
