@@ -21,7 +21,7 @@ api.interceptors.request.use(
   (error) => Promise.reject(error)
 );
 
-export const loginUser = async (credentials) => {
+export const loginUser = async (credentials: LoginCredentials): Promise<{ token: string }> => {
     const response = await api.post('/api/login', credentials);
     return response.data;
 };
