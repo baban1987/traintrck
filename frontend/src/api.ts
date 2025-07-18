@@ -4,18 +4,24 @@ import type {
     LoginCredentials, LocoData, TrainData, TrainScheduleData, TrainProfileData, HistoryPoint 
 } from './types';
 
-const api = axios.create();
+const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
+
+const api = axios.create({
+    baseURL: API_URL // Set the base URL for all requests
+});
 
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('authToken');
-    if (token) { config.headers.Authorization = `Bearer ${token}`; }
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
+    }
     return config;
   },
   (error) => Promise.reject(error)
 );
 
-export const loginUser = async (credentials: LoginCredentials): Promise<{ token: string }> => {
+export const loginUser = async (credentials) => {
     const response = await api.post('/api/login', credentials);
     return response.data;
 };
