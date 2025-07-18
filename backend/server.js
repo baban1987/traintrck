@@ -57,7 +57,14 @@ app.get('/api/fois/loco/:locoId', async (req, res) => {
     try {
         const { locoId } = req.params;
         const url = `https://fois.indianrail.gov.in/foisweb/GG_AjaxInteraction?Optn=RTIS_CURRENT_LOCO_RPTG&Loco=${locoId}`;
-        const response = await axios.get(url);
+        
+        // Add User-Agent Header to mimic a browser
+        const response = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+        });
+
         const data = response.data;
         if (!data.LocoDtls || data.LocoDtls.length === 0 || !data.LocoDtls[0].PopUpMsg) { return res.status(404).json({ message: 'Loco not found on FOIS server.' }); }
         const details = data.LocoDtls[0];
