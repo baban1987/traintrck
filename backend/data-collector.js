@@ -64,11 +64,17 @@ const collectData = async () => {
         console.log(`[Worker] Found ${activeLocos.length} active locos. Fetching live data from FOIS...`);
 
         // Step 2: Create a promise to fetch data for each loco from the FOIS API
-        const foisPromises = activeLocos.map(loco => 
-            axios.get(`https://fois.indianrail.gov.in/foisweb/GG_AjaxInteraction?Optn=RTIS_CURRENT_LOCO_RPTG&Loco=${loco.loco_no}`)
-                .then(response => ({ loco_no: loco.loco_no, data: response.data, status: 'fulfilled' }))
-                .catch(error => ({ loco_no: loco.loco_no, status: 'rejected', reason: error.message }))
-        );
+        const foisPromises = activeLocos.map(loco => {
+            const url = `https://fois.indianrail.gov.in/foisweb/GG_AjaxInteraction?Optn=RTIS_CURRENT_LOCO_RPTG&Loco=${loco.loco_no}`;
+            // Add User-Agent Header to the worker's request
+            return axios.get(url, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                }
+            })
+            .then(response => ({ loco_no: loco.loco_no, data: response.data, status: 'fulfilled' }))
+            .catch(error => ({ loco_no: loco.loco_no, status: 'rejected', reason: error.message }));
+        });
 
         // Step 3: Execute all promises concurrently
         const results = await Promise.all(foisPromises);
