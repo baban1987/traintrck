@@ -15,7 +15,7 @@ const authMiddleware = require('./authMiddleware');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// --- 1. Setup Top-Level Middleware (Run ONCE at the top) ---
+// --- 1. SETUP TOP-LEVEL MIDDLEWARE (RUN ONCE AT THE TOP) ---
 const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:5173'];
 const corsOptions = {
     origin: (origin, callback) => {
@@ -28,15 +28,15 @@ const corsOptions = {
     credentials: true,
 };
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // Handle preflight requests
+app.options('*', cors(corsOptions)); // Handle preflight requests for all routes
 app.use(express.json());
 
-// --- 2. Database Connection (Connect ONCE) ---
+// --- 2. DATABASE CONNECTION (CONNECT ONCE) ---
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('[Main] ✅ Successfully connected to MongoDB Atlas!'))
     .catch(err => console.error('[Main] ❌ Error connecting to MongoDB:', err));
 
-// --- 3. Public Login Route (Defined BEFORE authentication) ---
+// --- 3. PUBLIC ROUTES (DEFINED BEFORE AUTHENTICATION) ---
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) { return res.status(400).json({ message: 'Username and password are required.' }); }
@@ -47,32 +47,26 @@ app.post('/api/login', async (req, res) => {
     res.json({ token });
 });
 
-// --- 4. Apply Authentication Middleware (Apply ONCE) ---
+// --- 4. AUTHENTICATION MIDDLEWARE (APPLY ONCE) ---
 // All routes defined after this point will be protected.
 app.use(authMiddleware);
 
-// --- 5. Protected API Routes ---
+// --- 5. PROTECTED API ROUTES ---
 
 app.get('/api/fois/loco/:locoId', async (req, res) => {
     try {
         const { locoId } = req.params;
         const url = `https://fois.indianrail.gov.in/foisweb/GG_AjaxInteraction?Optn=RTIS_CURRENT_LOCO_RPTG&Loco=${locoId}`;
         const response = await axios.get(url);
-
         const data = response.data;
-        if (!data.LocoDtls || data.LocoDtls.length === 0 || !data.LocoDtls[0].PopUpMsg) {
-            return res.status(404).json({ message: 'Loco not found on FOIS server.' });
-        }
-
+        if (!data.LocoDtls || data.LocoDtls.length === 0 || !data.LocoDtls[0].PopUpMsg) { return res.status(404).json({ message: 'Loco not found on FOIS server.' }); }
         const details = data.LocoDtls[0];
         const popupMsg = details.PopUpMsg;
-        
         const stripHtml = (html) => html ? html.replace(/<[^>]*>/g, '').trim() : '';
         const stationMatch = popupMsg.match(/Station:\s*(.*?)(?=<br|<div|$)/s);
         const eventMatch = popupMsg.match(/Event:\s*(.*?)(?=<br|<div|$)/s);
         const speedMatch = popupMsg.match(/Speed:\s*(.*?)(?=<br|<div|$)/s);
         const timestampMatch = popupMsg.match(/\((\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})\)/);
-
         let timestamp = new Date();
         if (timestampMatch && timestampMatch[1]) {
             const year = new Date().getFullYear();
@@ -80,28 +74,12 @@ app.get('/api/fois/loco/:locoId', async (req, res) => {
             const [day, month] = date.split('-');
             timestamp = new Date(`${year}-${month}-${day}T${time}`);
         }
-
-        const structuredResponse = {
-            loco_no: parseInt(locoId, 10),
-            latitude: parseFloat(details.Lttd),
-            longitude: parseFloat(details.Lgtd),
-            station: stationMatch ? stripHtml(stationMatch[1]) : 'N/A',
-            event: eventMatch ? stripHtml(eventMatch[1]) : 'N/A',
-            speed: speedMatch ? (parseInt(stripHtml(speedMatch[1]), 10) || 0) : 0,
-            timestamp: timestamp.toISOString(),
-            train_no: null 
-        };
-
+        const structuredResponse = { loco_no: parseInt(locoId, 10), latitude: parseFloat(details.Lttd), longitude: parseFloat(details.Lgtd), station: stationMatch ? stripHtml(stationMatch[1]) : 'N/A', event: eventMatch ? stripHtml(eventMatch[1]) : 'N/A', speed: speedMatch ? (parseInt(stripHtml(speedMatch[1]), 10) || 0) : 0, timestamp: timestamp.toISOString(), train_no: null };
         const dbRecord = await LocoPosition.findOne({ loco_no: parseInt(locoId) }).sort({ timestamp: -1 });
-        if (dbRecord && dbRecord.train_no) {
-            structuredResponse.train_no = dbRecord.train_no;
-        }
-        
+        if (dbRecord && dbRecord.train_no) { structuredResponse.train_no = dbRecord.train_no; }
         res.json(structuredResponse);
     } catch (error) {
-        if (error.response && typeof error.response.data === 'string') {
-            return res.status(404).json({ message: 'Loco not found or invalid response from FOIS.' });
-        }
+        if (error.response && typeof error.response.data === 'string') { return res.status(404).json({ message: 'Loco not found or invalid response from FOIS.' }); }
         res.status(500).json({ message: 'Server error while fetching data from FOIS.', error: error.message });
     }
 });
@@ -166,7 +144,7 @@ app.get('/api/search/train/:trainId', async (req, res) => {
     }
 });
 
-// --- 6. Background Worker Logic ---
+// --- 6. BACKGROUND WORKER LOGIC ---
 function startDataCollectorWorker() {
     console.log('[Main] Starting data collector worker...');
     const worker = new Worker(path.resolve(__dirname, 'data-collector.js'));
@@ -187,7 +165,7 @@ function startDataCollectorWorker() {
     });
 }
 
-// --- 7. Start the server (MUST be the last major step) ---
+// --- 7. START THE SERVER (MUST BE THE LAST MAJOR STEP) ---
 app.listen(PORT, () => {
     console.log(`[Main] 🚀 API server is running on http://localhost:${PORT}`);
     startDataCollectorWorker();
