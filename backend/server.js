@@ -1,9 +1,10 @@
-// server.js (Final On-Demand Caching Version)
+// server.js
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-// No longer need worker_threads or path
+const { Worker } = require('worker_threads');
+const path = require('path');
 const axios = require('axios');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -14,25 +15,14 @@ const authMiddleware = require('./authMiddleware');
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// --- 1. SETUP MIDDLEWARE ---
-const allowedOrigins = [process.env.FRONTEND_URL, 'http://localhost:5173'];
-const corsOptions = {
-    origin: (origin, callback) => {
-        if (!origin || allowedOrigins.indexOf(origin) !== -1) { callback(null, true); } 
-        else { callback(new Error('Not allowed by CORS')); }
-    },
-    credentials: true,
-};
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
+app.use(cors());
 app.use(express.json());
 
-// --- 2. DATABASE CONNECTION ---
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('[Main] ✅ Successfully connected to MongoDB Atlas!'))
     .catch(err => console.error('[Main] ❌ Error connecting to MongoDB:', err));
 
-// --- 3. PUBLIC ROUTES ---
+// --- Public Login Route ---
 app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
     if (!username || !password) { return res.status(400).json({ message: 'Username and password are required.' }); }
@@ -43,26 +33,29 @@ app.post('/api/login', async (req, res) => {
     res.json({ token });
 });
 
-// --- 4. AUTHENTICATION MIDDLEWARE ---
+// --- Apply Authentication Middleware ---
 app.use(authMiddleware);
 
-// --- 5. PROTECTED API ROUTES ---
-
-// This is now our primary endpoint for both live data AND data collection.
+// --- UPDATED: FOIS Proxy with final, robust parsing for all fields ---
 app.get('/api/fois/loco/:locoId', async (req, res) => {
     try {
         const { locoId } = req.params;
         const url = `https://fois.indianrail.gov.in/foisweb/GG_AjaxInteraction?Optn=RTIS_CURRENT_LOCO_RPTG&Loco=${locoId}`;
-        const response = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0...' } });
+        const response = await axios.get(url);
 
         const data = response.data;
-        if (!data.LocoDtls || data.LocoDtls.length === 0 || !data.LocoDtls[0].PopUpMsg) { return res.status(404).json({ message: 'Loco not found on FOIS server.' }); }
-        
+        if (!data.LocoDtls || data.LocoDtls.length === 0 || !data.LocoDtls[0].PopUpMsg) {
+            return res.status(404).json({ message: 'Loco not found or has no position data on the FOIS/RTIS server.' });
+        }
+
         const details = data.LocoDtls[0];
         const popupMsg = details.PopUpMsg;
+
         const stripHtml = (html) => html ? html.replace(/<[^>]*>/g, '').trim() : '';
+
         const stationMatch = popupMsg.match(/Station:\s*(.*?)(?=<br|<div|$)/s);
         const eventMatch = popupMsg.match(/Event:\s*(.*?)(?=<br|<div|$)/s);
+        // --- FIX: Use the same robust line-capturing logic for speed ---
         const speedMatch = popupMsg.match(/Speed:\s*(.*?)(?=<br|<div|$)/s);
         const timestampMatch = popupMsg.match(/\((\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})\)/);
 
@@ -80,40 +73,137 @@ app.get('/api/fois/loco/:locoId', async (req, res) => {
             longitude: parseFloat(details.Lgtd),
             station: stationMatch ? stripHtml(stationMatch[1]) : 'N/A',
             event: eventMatch ? stripHtml(eventMatch[1]) : 'N/A',
+            // --- FIX: Clean the speed string and then parse the integer ---
             speed: speedMatch ? (parseInt(stripHtml(speedMatch[1]), 10) || 0) : 0,
-            timestamp: timestamp, // Use Date object for saving
-            train_no: null 
+            timestamp: timestamp.toISOString(),
+            train_no: null
         };
 
         const dbRecord = await LocoPosition.findOne({ loco_no: parseInt(locoId) }).sort({ timestamp: -1 });
-        if (dbRecord && dbRecord.train_no) { structuredResponse.train_no = dbRecord.train_no; }
-        
-        // --- NEW: Save the fresh data point to our database (on-demand caching) ---
-        // We run this in the background and don't wait for it to complete before responding to the user.
-        LocoPosition.updateOne(
-            { loco_no: structuredResponse.loco_no, timestamp: structuredResponse.timestamp },
-            { $set: structuredResponse },
-            { upsert: true }
-        ).catch(err => console.error('[DB Caching Error]', err.message)); // Log errors but don't crash
+        if (dbRecord && dbRecord.train_no) {
+            structuredResponse.train_no = dbRecord.train_no;
+        }
 
-        // Convert timestamp to string for the JSON response
-        structuredResponse.timestamp = timestamp.toISOString();
         res.json(structuredResponse);
 
     } catch (error) {
-        if (error.response && typeof error.response.data === 'string') { return res.status(404).json({ message: 'Loco not found or invalid response from FOIS.' }); }
+        if (error.response && typeof error.response.data === 'string') {
+            return res.status(404).json({ message: 'Loco not found or invalid response from FOIS.' });
+        }
         res.status(500).json({ message: 'Server error while fetching data from FOIS.', error: error.message });
     }
 });
 
-// Other routes remain the same
-app.get('/api/train-profile/:trainNo', async (req, res) => { /* ... */ });
-app.get('/api/train-schedules', async (req, res) => { /* ... */ });
-app.get('/api/loco/history/:locoId', async (req, res) => { /* ... */ });
-app.get('/api/search/train/:trainId', async (req, res) => { /* ... */ });
 
-// --- 6. START THE SERVER ---
-// The background worker logic is completely removed.
+
+// --- Existing Protected API Routes ---
+
+app.get('/api/train-profile/:trainNo', async (req, res) => {
+    try {
+        const { trainNo } = req.params;
+        const { date } = req.query;
+        if (!date || typeof date !== 'string') { return res.status(400).json({ message: 'A start date query parameter is required.' }); }
+        const d = new Date(date);
+        const formattedDate = d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' }).replace(/ /g, '-');
+        const url = `https://www.railjournal.in/RailRadar/train-profile.php?trainNo=${trainNo}&start_date=${formattedDate}`;
+        const response = await axios.get(url);
+        res.json(response.data);
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to fetch train profile data', error: error.message });
+    }
+});
+
+app.get('/api/train-schedules', async (req, res) => {
+    try {
+        const response = await axios.post('https://www.railjournal.in/RailRadar/', 'action=refresh_data');
+        if (response.data && response.data.trainPositionData) {
+            res.json(response.data.trainPositionData);
+        } else {
+            res.status(404).json({ message: "Train schedule data not found in API response." });
+        }
+    } catch (error) {
+        res.status(500).json({ message: 'Failed to fetch train schedule data', error: error.message });
+    }
+});
+
+app.get('/api/loco/history/:locoId', async (req, res) => {
+    try {
+        const { locoId } = req.params;
+        const history = await LocoPosition.find({ loco_no: parseInt(locoId) }).sort({ timestamp: -1 }).limit(200);
+        res.json(history);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching historical data', error: error.message });
+    }
+});
+
+app.get('/api/search/loco/:locoId', async (req, res) => {
+    try {
+        const { locoId } = req.params;
+        const latestPosition = await LocoPosition.findOne({ loco_no: parseInt(locoId) }).sort({ timestamp: -1 });
+        if (latestPosition) {
+            res.json(latestPosition);
+        } else {
+            res.status(404).json({ message: 'Loco not found in database' });
+        }
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+});
+
+app.get('/api/search/train/:trainId', async (req, res) => {
+    try {
+        const { trainId } = req.params;
+        const latestPosition = await LocoPosition.findOne({ train_no: parseInt(trainId) }).sort({ timestamp: -1 });
+        if (latestPosition) {
+            res.json(latestPosition);
+        } else {
+            res.status(404).json({ message: 'Train not found in database' });
+        }
+    } catch (error) {
+        res.status(500).json({ message: 'Server error', error: error.message });
+    }
+});
+
+// --- **NEW: Serve Static Frontend Files in Production** ---
+const frontendDistPath = path.resolve(__dirname, '..', 'frontend', 'dist');
+if (process.env.NODE_ENV === 'production') {
+    console.log(`[Main] Serving static files from: ${frontendDistPath}`);
+    app.use(express.static(frontendDistPath));
+
+    // For any route not recognized by the API, serve the main index.html file.
+    // This is crucial for React Router to work correctly on page reloads.
+    app.get('*', (req, res) => {
+        res.sendFile(path.join(frontendDistPath, 'index.html'));
+    });
+}
+
+// --- Background Worker Logic ---
+function startDataCollectorWorker() {
+    console.log('[Main] Starting data collector worker...');
+    const worker = new Worker(path.resolve(__dirname, 'data-collector.js'));
+    worker.on('message', (msg) => { console.log('[Main] Message from worker:', msg); });
+    worker.on('error', (err) => {
+        console.error('[Main] Worker error:', err);
+        console.log('[Main] Restarting worker in 10 seconds...');
+        setTimeout(startDataCollectorWorker, 10000);
+    });
+    worker.on('exit', (code) => {
+        if (code !== 0) {
+            console.error(`[Main] Worker stopped with exit code ${code}`);
+            console.log('[Main] Restarting worker in 10 seconds...');
+            setTimeout(startDataCollectorWorker, 10000);
+        } else {
+            console.log('[Main] Worker exited cleanly.');
+        }
+    });
+}
+
+// --- Start Server and Worker ---
 app.listen(PORT, () => {
     console.log(`[Main] 🚀 API server is running on http://localhost:${PORT}`);
+    if (process.env.NODE_ENV === 'production') {
+        startDataCollectorWorker();
+    } else {
+        console.log('[Main] Skipping worker start in development mode.');
+    }
 });
