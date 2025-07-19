@@ -9,8 +9,9 @@ export interface LoginCredentials {
 // For the live tracking map page
 export interface HistoryPoint {
   _id: string; 
-  loco_no: number; // Add for consistency
-  train_no: number | null; // Add this property
+  // --- ADD THIS LINE ---
+  train_no: number | null; // This field was missing
+  // ---------------------
   latitude: number;
   longitude: number;
   speed: number;
@@ -30,9 +31,7 @@ export interface LocoData {
   event: string;
   timestamp: string;
 }
-export interface LocoData extends Omit<HistoryPoint, '_id'> {}
-
-export type TrainData = LocoData;  
+export type TrainData = LocoData; 
 
 // For the loco schedule search result
 export interface TrainScheduleData {
